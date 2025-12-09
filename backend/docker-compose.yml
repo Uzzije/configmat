@@ -1,0 +1,75 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: configmat
+      POSTGRES_USER: configmat
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-configmat_dev_password}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5434:5432"
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U configmat" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  backend:
+    build: .
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes:
+      - .:/app
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://configmat:${DB_PASSWORD:-configmat_dev_password}@postgres:5432/configmat
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: ${SECRET_KEY:-django-insecure-dev-key}
+      DEBUG: ${DEBUG:-True}
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: configmat
+      DB_USER: configmat
+      DB_PASSWORD: ${DB_PASSWORD:-configmat_dev_password}
+
+  worker:
+    build: .
+    command: python manage.py rundramatiq --processes 2 --threads 4
+    volumes:
+      - .:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://configmat:${DB_PASSWORD:-configmat_dev_password}@postgres:5432/configmat
+      REDIS_URL: redis://redis:6379/0
+      SECRET_KEY: ${SECRET_KEY:-django-insecure-dev-key}
+      DEBUG: ${DEBUG:-True}
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: configmat
+      DB_USER: configmat
+      DB_PASSWORD: ${DB_PASSWORD:-configmat_dev_password}
+
+volumes:
+  postgres_data:
