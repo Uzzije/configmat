@@ -34,7 +34,7 @@ graph TD
 You can self-host ConfigMat easily using Render (recommended for MVP) or Docker.
 
 **Deploy to Render:**
-1.  Fork this repository.
+1.  Clone this repository.
 2.  Sign up for [Render.com](https://render.com).
 3.  New -> Blueprint -> Select this repo's `app/render.yaml`.
 4.  Done! Your instance is live.
