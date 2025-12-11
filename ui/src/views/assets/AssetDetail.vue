@@ -5,6 +5,9 @@ import { useEnvironmentStore } from '../../stores/environment'
 import { useAuthStore } from '../../stores/auth'
 import { assetService, configObjectService } from '../../api/services'
 import CodeEditor from '../../components/CodeEditor.vue'
+import DiffViewer from '../../components/DiffViewer.vue'
+import SmartInput from '../../components/SmartInput.vue'
+import SchemaBuilder from '../../components/SchemaBuilder.vue'
 
 const route = useRoute()
 const router = useRouter()
@@ -23,6 +26,7 @@ const showEditValuesModal = ref(false)
 const showEditDescriptionModal = ref(false)
 const showPromoteModal = ref(false)
 const showHistoryModal = ref(false)
+const showSchemaModal = ref(false)
 const editingObject = ref(null)
 const viewingHistoryObject = ref(null)
 const historyVersions = ref([])
@@ -47,6 +51,11 @@ const promoteForm = ref({
   from_environment: 'local',
   to_environment: 'stage'
 })
+
+// Promote Preview State
+const isPreviewingPromote = ref(false)
+const promoteDiffs = ref([])
+const promoteLoading = ref(false)
 
 const currentEnvironment = computed(() => environmentStore.currentEnvironment)
 
@@ -259,22 +268,6 @@ function openEditValues(configObject) {
   showEditValuesModal.value = true
 }
 
-async function handleSaveValues() {
-  try {
-    await configObjectService.updateObjectValues(
-      editingObject.value.id,
-      editValuesForm.value.environment,
-      editValuesForm.value.values
-    )
-    
-    await loadConfigObjects()
-    showEditValuesModal.value = false
-    editingObject.value = null
-  } catch (err) {
-    console.error('Failed to save values:', err)
-    alert('Failed to save values. Please try again.')
-  }
-}
 
 function addKVRow() {
   editValuesForm.value.values.push({
@@ -310,6 +303,58 @@ function openEditDescription(configObject) {
   showEditDescriptionModal.value = true
 }
 
+// Mock Schema Store (In production this would come from backend)
+// Structure: { [assetId]: { [configKey]: { type: 'number', min: 10, ... } } }
+const mockSchemas = ref({})
+
+// Get schema for current object
+const currentObjectSchema = computed(() => {
+    if (!editingObject.value) return {}
+    return mockSchemas.value[editingObject.value.id] || {}
+})
+
+function handleSaveSchema(newSchema) {
+    if (!editingObject.value) return
+    const assetId = editingObject.value.id
+    mockSchemas.value[assetId] = newSchema
+    
+    // In real app, we would save this to backend
+    console.log('Saved Schema for', editingObject.value.name, newSchema)
+}
+
+// Validation State for Edit Form
+const formErrors = ref({})
+
+function handleValidationError(key, errorMsg) {
+    if (errorMsg) {
+        formErrors.value[key] = errorMsg
+    } else {
+        delete formErrors.value[key]
+    }
+}
+
+const isFormValid = computed(() => Object.keys(formErrors.value).length === 0)
+
+async function handleSaveValues() {
+  if (!isFormValid.value) return 
+
+  try {
+    await configObjectService.updateObjectValues(
+      editingObject.value.id,
+      editValuesForm.value.environment,
+      editValuesForm.value.values
+    )
+    
+    await loadConfigObjects()
+    showEditValuesModal.value = false
+    editingObject.value = null
+    formErrors.value = {}
+  } catch (err) {
+    console.error('Failed to save values:', err)
+    alert('Failed to save values. Please try again.')
+  }
+}
+
 async function handleSaveDescription() {
   try {
     await configObjectService.updateObject(editingObject.value.id, {
@@ -328,8 +373,51 @@ async function handleSaveDescription() {
   }
 }
 
-async function handlePromote() {
+async function handlePromotePreview() {
+  promoteLoading.value = true
+  promoteDiffs.value = []
+  
   try {
+    // 1. Fetch all objects for the asset
+    const fromEnv = promoteForm.value.from_environment
+    const toEnv = promoteForm.value.to_environment
+    
+    // We reuse existing configObjects if possible or fetch fresh
+    const objects = configObjects.value
+    
+    // Calculate Diff for each object
+    for (const obj of objects) {
+      const fromValues = obj.values.filter(v => v.environment === fromEnv)
+      const toValues = obj.values.filter(v => v.environment === toEnv)
+      
+      const fromData = extractDiffValues(fromValues)
+      const toData = extractDiffValues(toValues)
+      
+      // Determine if there is a change
+      // Simplistic check: JSON stringify comparison
+      if (JSON.stringify(fromData) !== JSON.stringify(toData)) {
+        promoteDiffs.value.push({
+          id: obj.id,
+          name: obj.name,
+          object_type: obj.object_type,
+          oldValue: toData,
+          newValue: fromData
+        })
+      }
+    }
+    
+    isPreviewingPromote.value = true
+  } catch (err) {
+    console.error('Failed to preview promote:', err)
+    alert('Failed to calculate differences.')
+  } finally {
+    promoteLoading.value = false
+  }
+}
+
+async function handlePromoteConfirm() {
+  try {
+    promoteLoading.value = true
     await assetService.promoteAsset(
       asset.value.slug,
       promoteForm.value.from_environment,
@@ -337,14 +425,27 @@ async function handlePromote() {
     )
     
     showPromoteModal.value = false
-    alert('Promotion started successfully! Changes will appear shortly.')
+    isPreviewingPromote.value = false
+    alert('Promotion successful! Environments are now synced.')
     
     // Reload after a delay
-    setTimeout(() => loadConfigObjects(), 2000)
+    setTimeout(() => {
+        loadConfigObjects()
+        // Reset modal state
+        promoteDiffs.value = [] 
+    }, 1000)
   } catch (err) {
     console.error('Failed to promote:', err)
     alert('Failed to promote configuration. Please try again.')
+  } finally {
+    promoteLoading.value = false
   }
+}
+
+function resetPromoteModal() {
+    showPromoteModal.value = false
+    isPreviewingPromote.value = false
+    promoteDiffs.value = []
 }
 
 function editAsset() {
@@ -381,6 +482,30 @@ async function openHistory(configObject) {
     console.error('Failed to load history:', err)
     alert('Failed to load history.')
   }
+}
+
+// Helper to extract values for diff
+function extractDiffValues(versionValues) {
+  if (!versionValues) return {}
+  
+  // If it's a KV array, convert to object for cleaner diff
+  if (Array.isArray(versionValues)) {
+    const obj = {}
+    versionValues.forEach(v => {
+        if (v.value_type === 'json') obj[v.key] = v.value_json
+        else if (v.value_type === 'boolean') obj[v.key] = v.value_string === 'true'
+        else if (v.value_type === 'number') obj[v.key] = Number(v.value_string)
+        else obj[v.key] = v.value_string
+    })
+    return obj
+  }
+  return versionValues
+}
+
+// Helper to get previous version for diffing
+function getPreviousVersion(index) {
+  if (index >= historyVersions.value.length - 1) return null
+  return historyVersions.value[index + 1]
 }
 
 // Watch for environment changes
@@ -533,6 +658,9 @@ onMounted(() => {
                   <p class="text-sm text-muted-foreground">Type: {{ obj.object_type.toUpperCase() }}</p>
                 </div>
                 <div class="flex gap-2">
+                  <button @click="showSchemaModal = true; editingObject = obj" class="px-3 py-1.5 bg-secondary text-secondary-foreground rounded text-sm">
+                    Rules
+                  </button>
                   <button @click="openHistory(obj)" class="px-3 py-1.5 bg-secondary text-secondary-foreground rounded text-sm">
                     History
                   </button>
@@ -828,15 +956,16 @@ onMounted(() => {
                 />
               </div>
               
-              <!-- String/Number Input -->
-              <input
-                v-else
-                v-model="row.value_string"
-                type="text"
-                placeholder="Value"
-                required
-                class="flex-1 px-3 py-2 bg-background border border-input rounded text-sm font-mono"
-              />
+              <!-- Smart Input (Replaces standard inputs) -->
+              <div v-else class="flex-1">
+                <SmartInput
+                    v-model="row.value_string"
+                    :rule="currentObjectSchema[row.key] || {}"
+                    :type="row.value_type"
+                    placeholder="Value"
+                    @validation-error="(msg) => handleValidationError(row.key, msg)"
+                />
+              </div>
               
               <button
                 type="button"
@@ -887,7 +1016,13 @@ onMounted(() => {
           </div>
 
           <div class="flex gap-2 pt-4">
-            <button type="submit" class="flex-1 px-4 py-2 bg-primary text-primary-foreground rounded-lg">Save Values</button>
+            <button 
+                type="submit" 
+                class="flex-1 px-4 py-2 bg-primary text-primary-foreground rounded-lg disabled:opacity-50 disabled:cursor-not-allowed"
+                :disabled="!isFormValid"
+            >
+                Save Values
+            </button>
             <button type="button" @click="showEditValuesModal = false" class="px-4 py-2 bg-background border border-input rounded-lg">Cancel</button>
           </div>
         </form>
@@ -895,12 +1030,17 @@ onMounted(() => {
     </div>
 
     <!-- Promote Modal -->
-    <div v-if="showPromoteModal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50" @click.self="showPromoteModal = false">
-      <div class="bg-card border border-border rounded-lg p-6 w-full max-w-md">
+    <div v-if="showPromoteModal" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" @click.self="resetPromoteModal">
+      <div 
+        class="bg-card border border-border rounded-lg p-6 w-full flex flex-col max-h-[90vh]"
+        :class="isPreviewingPromote ? 'max-w-4xl' : 'max-w-md'"
+      >
         <h2 class="text-xl font-bold text-foreground mb-4">Promote Configuration</h2>
-        <form @submit.prevent="handlePromote" class="space-y-4">
+        
+        <!-- Step 1: Selection -->
+        <form v-if="!isPreviewingPromote" @submit.prevent="handlePromotePreview" class="space-y-4">
           <div>
-            <label class="block text-sm font-medium text-foreground mb-2">From Environment</label>
+            <label class="block text-sm font-medium text-foreground mb-2">From Environment (Source)</label>
             <select v-model="promoteForm.from_environment" class="w-full px-4 py-2 bg-background border border-input rounded-lg">
               <option value="local">Local</option>
               <option value="stage">Stage</option>
@@ -908,31 +1048,75 @@ onMounted(() => {
             </select>
           </div>
           <div>
-            <label class="block text-sm font-medium text-foreground mb-2">To Environment</label>
+            <label class="block text-sm font-medium text-foreground mb-2">To Environment (Target)</label>
             <select v-model="promoteForm.to_environment" class="w-full px-4 py-2 bg-background border border-input rounded-lg">
               <option value="local">Local</option>
               <option value="stage">Stage</option>
               <option value="prod">Production</option>
             </select>
           </div>
-          <p class="text-sm text-muted-foreground">
-            This will sync the configuration structure from <strong>{{ promoteForm.from_environment }}</strong> to <strong>{{ promoteForm.to_environment }}</strong>.
-          </p>
+
+          <div v-if="promoteForm.from_environment === promoteForm.to_environment" class="p-3 bg-destructive/10 text-destructive text-sm rounded">
+             Source and Target environments cannot be the same.
+          </div>
+
           <div class="bg-muted/50 p-3 rounded text-xs text-muted-foreground space-y-2">
             <p>
-              <span class="font-semibold text-foreground">Key-Value Objects:</span> 
-              New keys are added. Obsolete keys are removed. <span class="text-green-600 font-medium">Existing values are preserved.</span>
-            </p>
-            <p>
-              <span class="font-semibold text-foreground">Other Objects:</span> 
-              The entire configuration is overwritten.
+              This will calculate the differences between environments and allow you to review them before applying.
             </p>
           </div>
           <div class="flex gap-2 pt-2">
-            <button type="submit" class="flex-1 px-4 py-2 bg-primary text-primary-foreground rounded-lg">Promote</button>
-            <button type="button" @click="showPromoteModal = false" class="px-4 py-2 bg-background border border-input rounded-lg">Cancel</button>
+            <button 
+                type="submit" 
+                class="flex-1 px-4 py-2 bg-primary text-primary-foreground rounded-lg disabled:opacity-50"
+                :disabled="promoteLoading || promoteForm.from_environment === promoteForm.to_environment"
+            >
+                {{ promoteLoading ? 'Calculating...' : 'Review Changes' }}
+            </button>
+            <button type="button" @click="resetPromoteModal" class="px-4 py-2 bg-background border border-input rounded-lg">Cancel</button>
           </div>
         </form>
+
+        <!-- Step 2: Review (Diff) -->
+        <div v-else class="flex-1 overflow-hidden flex flex-col">
+            <div class="mb-4 text-sm text-muted-foreground">
+                Reviewing changes from <strong>{{ promoteForm.from_environment }}</strong> &rarr; <strong>{{ promoteForm.to_environment }}</strong>
+            </div>
+
+            <div class="flex-1 overflow-y-auto space-y-6 pr-2">
+                <div v-if="promoteDiffs.length === 0" class="text-center py-12 text-muted-foreground">
+                    <div class="text-lg">No changes detected.</div>
+                    <p class="text-sm">Environments are already in sync.</p>
+                </div>
+
+                <div v-else v-for="diff in promoteDiffs" :key="diff.id">
+                    <DiffViewer
+                        :old-value="diff.oldValue"
+                        :new-value="diff.newValue"
+                        :mode="diff.object_type === 'kv' ? 'visual' : 'code'"
+                        :title="diff.name"
+                    />
+                </div>
+            </div>
+
+            <div class="flex gap-2 pt-6 mt-2 border-t border-border">
+                <button 
+                    @click="handlePromoteConfirm" 
+                    class="flex-1 px-4 py-2 bg-primary text-primary-foreground rounded-lg disabled:opacity-50"
+                    :disabled="promoteLoading || promoteDiffs.length === 0"
+                >
+                    {{ promoteLoading ? 'Promoting...' : `Confirm ${promoteDiffs.length} Change${promoteDiffs.length !== 1 ? 's' : ''}` }}
+                </button>
+                <button 
+                    @click="isPreviewingPromote = false" 
+                    class="px-4 py-2 bg-background border border-input rounded-lg"
+                    :disabled="promoteLoading"
+                >
+                    Back
+                </button>
+            </div>
+        </div>
+
       </div>
     </div>
 
@@ -954,7 +1138,7 @@ onMounted(() => {
         </div>
 
         <div v-else class="space-y-4">
-          <div v-for="version in historyVersions" :key="version.id" class="border border-border rounded-lg p-4">
+          <div v-for="(version, index) in historyVersions" :key="version.id" class="border border-border rounded-lg p-4 transition-colors hover:border-primary/50">
             <div class="flex items-center justify-between mb-2">
               <div class="flex items-center gap-3">
                 <span class="px-2 py-1 bg-primary/10 text-primary rounded text-xs font-bold">
@@ -972,20 +1156,50 @@ onMounted(() => {
               </div>
             </div>
 
-            <!-- Snapshot Display -->
-            <div class="bg-muted/30 rounded p-3 font-mono text-xs overflow-x-auto max-h-60 mb-3">
-              <pre>{{ JSON.stringify(version.value_snapshot.values, null, 2) }}</pre>
+            <!-- Diff Display -->
+            <div class="mb-3">
+              <DiffViewer
+                :old-value="extractDiffValues(getPreviousVersion(index)?.value_snapshot?.values)"
+                :new-value="extractDiffValues(version.value_snapshot.values)"
+                :mode="viewingHistoryObject.object_type === 'kv' ? 'visual' : 'code'"
+                :title="index === historyVersions.length - 1 ? 'Initial Version' : 'Changes vs Previous'"
+              />
             </div>
 
             <div class="flex justify-end">
               <button 
                 @click="handleRollback(version)"
-                class="px-3 py-1.5 bg-secondary text-secondary-foreground rounded text-xs hover:opacity-90"
+                class="px-3 py-1.5 bg-secondary text-secondary-foreground rounded text-xs hover:opacity-90 transition-colors"
+                title="Revert configuration to this version"
               >
                 Rollback to this version
               </button>
             </div>
           </div>
+        </div>
+      </div>
+    </div>
+    <!-- Schema Builder Modal -->
+    <div v-if="showSchemaModal && editingObject" class="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4" @click.self="showSchemaModal = false">
+      <div class="bg-card border border-border rounded-lg p-6 w-full max-w-4xl max-h-[90vh]">
+        <div class="flex items-center justify-between mb-4">
+            <h2 class="text-xl font-bold text-foreground">
+              Validation Rules: {{ editingObject.name }}
+            </h2>
+            <button @click="showSchemaModal = false" class="text-muted-foreground hover:text-foreground">✕</button>
+        </div>
+        
+        <p class="text-sm text-muted-foreground mb-4">
+            Define constraints for configuration keys (e.g. min/max, regex). These rules will be enforced when editing values.
+        </p>
+
+        <SchemaBuilder
+            :model-value="mockSchemas[editingObject.id] || {}"
+            @update:model-value="handleSaveSchema"
+        />
+        
+        <div class="mt-4 flex justify-end">
+            <button @click="showSchemaModal = false" class="px-4 py-2 bg-primary text-primary-foreground rounded-lg">Done</button>
         </div>
       </div>
     </div>

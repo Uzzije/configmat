@@ -1,4 +1,4 @@
-# ConfigMat - Configuration Management for Data & Backend Teams (Under Development)
+# ConfigMat - Configuration Management for Data & Backend Teams (Not Ready Yst)
 
 
 ConfigMat is an open-source configuration management platform built specifically for **Data Engineers** and **Backend Teams**. It solves the problem of "hardcoded configs" and "messy env files" by providing a centralized dashboard where technical leads can define templates, and non-technical stakeholders (product managers, analysts) can safely update configuration values without touching code.
@@ -31,30 +31,16 @@ graph TD
 
 ### 1. Set up the Server
 
-You can self-host ConfigMat easily using Render (recommended for MVP) or Docker.
+From Source
+- Clone the repo
+- Run `docker-compose up` in /backend directory for the api server
+- Run npm install && npm run dev in /ui directory for the frontend server.
+- Make sure to set the environment variables in the .env file for both the api and ui servers.
 
-**Deploy to Render:**
-1.  Clone this repository.
-2.  Sign up for [Render.com](https://render.com).
-3.  New -> Blueprint -> Select this repo's `app/render.yaml`.
-4.  Done! Your instance is live.
 
-*(A fully managed SaaS version of ConfigMat is coming soon if you prefer not to manage infrastructure!)*
-
-### 2. Install the CLI
-
-Use the CLI to inject secrets and configs into your local development environment.
-
-```bash
-# MacOS / Linux
-curl -fsSL https://raw.githubusercontent.com/configmat/cli/main/install.sh | bash
-
-# Login to your instance
-configmat login --host https://your-configmat-instance.com
-
-# Run your app with injected config
-configmat run -- python app.py
-```
+From ConfigMat CLI (Coming Soon)
+- Install CLI
+- Run `configmat install app --dev` to install the docker images and build the ui app, then you just have to run `configmat run app --dev` to start the app in dev mode.
 
 ### 3. Integrate the SDK
 

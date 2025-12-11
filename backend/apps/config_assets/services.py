@@ -1,15 +1,48 @@
-import json
+import logging
 from django.core.cache import cache
 from django.contrib.auth import get_user_model
-from .models import ConfigAsset, ConfigValue, ConfigVersion
+from django.db import transaction
+from django.db.models import Prefetch
+from .models import ConfigAsset, ConfigObject, ConfigValue, ConfigVersion
 from apps.audit.services import log_activity
 
+logger = logging.getLogger(__name__)
+
 CACHE_TTL = 300  # 5 minutes
+
+
+def _resolve_value(val):
+    """
+    Resolve a ConfigValue to its Python representation.
+    
+    Args:
+        val: ConfigValue instance
+        
+    Returns:
+        The resolved value (str, float, bool, dict, or reference dict)
+    """
+    if val.value_type == 'string':
+        return val.value_string
+    elif val.value_type == 'number':
+        try:
+            return float(val.value_string)
+        except (ValueError, TypeError):
+            return 0
+    elif val.value_type == 'boolean':
+        return val.value_string == 'true'
+    elif val.value_type == 'json':
+        return val.value_json
+    elif val.value_type == 'reference':
+        return {"_ref": str(val.value_reference_id)}
+    return None
+
 
 def get_resolved_config(asset_slug, environment, tenant_id):
     """
     Resolve configuration for a given asset and environment.
     Returns a dictionary of {object_name: resolved_value}.
+    
+    Performance: Uses prefetch_related to avoid N+1 queries.
     """
     cache_key = f"config:{tenant_id}:{environment}:{asset_slug}"
     cached_data = cache.get(cache_key)
@@ -25,52 +58,29 @@ def get_resolved_config(asset_slug, environment, tenant_id):
     except ConfigAsset.DoesNotExist:
         return None
 
-    # Fetch all objects for this asset
-    config_objects = asset.config_objects.all()
+    # Fetch all objects with their values pre-fetched (avoids N+1 queries)
+    config_objects = asset.config_objects.prefetch_related(
+        Prefetch(
+            'values',
+            queryset=ConfigValue.objects.filter(environment=environment),
+            to_attr='env_values'
+        )
+    ).all()
     
     resolved_config = {}
     
     for obj in config_objects:
+        # Use prefetched values instead of querying per object
+        values = obj.env_values  # Pre-fetched!
+        
         if obj.object_type == 'kv':
             # Resolve KV object as a dictionary of keys
-            values = obj.values.filter(environment=environment)
-            kv_dict = {}
-            for val in values:
-                if val.value_type == 'string':
-                    kv_dict[val.key] = val.value_string
-                elif val.value_type == 'number':
-                    try:
-                        kv_dict[val.key] = float(val.value_string)
-                    except (ValueError, TypeError):
-                        kv_dict[val.key] = 0
-                elif val.value_type == 'boolean':
-                    kv_dict[val.key] = val.value_string == 'true'
-                elif val.value_type == 'json':
-                    kv_dict[val.key] = val.value_json
-                elif val.value_type == 'reference':
-                    kv_dict[val.key] = {"_ref": str(val.value_reference_id)}
-            
-            resolved_config[obj.name] = kv_dict if values.exists() else {}
+            kv_dict = {val.key: _resolve_value(val) for val in values}
+            resolved_config[obj.name] = kv_dict
         else:
             # Non-KV (e.g. 'json' type), assume single value per environment
-            value_obj = obj.values.filter(environment=environment).first()
-            
-            if value_obj:
-                if value_obj.value_type == 'string':
-                    resolved_config[obj.name] = value_obj.value_string
-                elif value_obj.value_type == 'number':
-                    try:
-                        resolved_config[obj.name] = float(value_obj.value_string)
-                    except (ValueError, TypeError):
-                        resolved_config[obj.name] = 0
-                elif value_obj.value_type == 'boolean':
-                    resolved_config[obj.name] = value_obj.value_string == 'true'
-                elif value_obj.value_type == 'json':
-                    resolved_config[obj.name] = value_obj.value_json
-                elif value_obj.value_type == 'reference':
-                    resolved_config[obj.name] = {"_ref": str(value_obj.value_reference_id)}
-            else:
-                resolved_config[obj.name] = None
+            value_obj = values[0] if values else None
+            resolved_config[obj.name] = _resolve_value(value_obj) if value_obj else None
 
     # Cache the result
     cache.set(cache_key, resolved_config, CACHE_TTL)
@@ -122,16 +132,32 @@ def create_config_version(config_object, environment, user_id, change_summary=""
     )
 
 
+@transaction.atomic
 def promote_asset(asset_id, from_env, to_env, user_id):
     """
     Promote configuration from one environment to another.
+    
     For KV objects: Syncs structure (keys). Adds new keys, removes obsolete keys. Preserves existing values.
     For other types: Overwrites target with source (since structure/data are inseparable).
+    
+    Transaction Safety: This operation is atomic - all changes succeed or all are rolled back.
     """
     try:
-        asset = ConfigAsset.objects.get(id=asset_id)
+        # Lock the asset row to prevent concurrent modifications
+        asset = ConfigAsset.objects.select_for_update().get(id=asset_id)
     except ConfigAsset.DoesNotExist:
+        logger.warning(f"Promote failed: asset {asset_id} not found")
         return False
+
+    logger.info(
+        f"Promoting asset {asset.slug} from {from_env} to {to_env}",
+        extra={
+            'asset_id': str(asset_id),
+            'from_env': from_env,
+            'to_env': to_env,
+            'user_id': str(user_id)
+        }
+    )
 
     # Get all objects for this asset
     config_objects = asset.config_objects.all()
@@ -141,8 +167,7 @@ def promote_asset(asset_id, from_env, to_env, user_id):
         source_values = obj.values.filter(environment=from_env)
         
         if not source_values.exists():
-            # If source is empty, should we clear target? 
-            # "Overwrite existing structure" implies yes.
+            # If source is empty, clear target
             obj.values.filter(environment=to_env).delete()
             continue
 
@@ -200,15 +225,16 @@ def promote_asset(asset_id, from_env, to_env, user_id):
             user_id=user_id,
             change_summary=f"Promoted from {from_env} (Structure Sync)"
         )
-        
-    # Invalidate cache for target env
-    invalidate_config_cache(asset.id, to_env)
     
-    # Log activity
+    # Cache invalidation is done outside the transaction for safety
+    # (cache failures should not cause DB rollback)
+    transaction.on_commit(lambda: invalidate_config_cache(asset.id, to_env))
+    
+    # Log activity (also on commit to ensure DB state is consistent)
     User = get_user_model()
     try:
         user = User.objects.get(id=user_id)
-        log_activity(
+        transaction.on_commit(lambda: log_activity(
             user=user,
             action="Promoted Asset",
             target=f"{asset.name} ({from_env} -> {to_env})",
@@ -217,20 +243,26 @@ def promote_asset(asset_id, from_env, to_env, user_id):
                 "from_env": from_env,
                 "to_env": to_env
             }
-        )
+        ))
     except User.DoesNotExist:
-        pass
+        logger.warning(f"User {user_id} not found for activity log")
     
     return True
 
 
+@transaction.atomic
 def rollback_to_version(version_id, user_id):
     """
     Rollback a config object to a specific version.
+    
+    Transaction Safety: This operation is atomic - all changes succeed or all are rolled back.
     """
     try:
-        version = ConfigVersion.objects.get(id=version_id)
+        version = ConfigVersion.objects.select_related(
+            'config_object', 'config_object__asset'
+        ).get(id=version_id)
     except ConfigVersion.DoesNotExist:
+        logger.warning(f"Rollback failed: version {version_id} not found")
         return False
         
     config_object = version.config_object
@@ -238,11 +270,18 @@ def rollback_to_version(version_id, user_id):
     snapshot = version.value_snapshot
     values = snapshot.get('values', [])
     
-    # 1. Clear existing values for this environment (optional, but safer to ensure exact match)
-    # Actually, update_or_create handles updates. But if the old version didn't have a key that currently exists, 
-    # we might want to delete the extra key?
-    # For a true rollback, we should probably delete keys that weren't in the snapshot.
+    logger.info(
+        f"Rolling back {config_object.name} to v{version.version_number}",
+        extra={
+            'config_object_id': str(config_object.id),
+            'version_id': str(version_id),
+            'version_number': version.version_number,
+            'environment': environment,
+            'user_id': str(user_id)
+        }
+    )
     
+    # Get current keys to compare with snapshot
     current_keys = set(ConfigValue.objects.filter(
         config_object=config_object, 
         environment=environment
@@ -250,7 +289,7 @@ def rollback_to_version(version_id, user_id):
     
     snapshot_keys = set(v['key'] for v in values)
     
-    # Delete keys that are not in the snapshot
+    # 1. Delete keys that are not in the snapshot
     keys_to_delete = current_keys - snapshot_keys
     if keys_to_delete:
         ConfigValue.objects.filter(
@@ -269,7 +308,7 @@ def rollback_to_version(version_id, user_id):
                 'value_type': val_data['value_type'],
                 'value_string': val_data.get('value_string'),
                 'value_json': val_data.get('value_json'),
-                'value_reference_id': val_data.get('reference_id') # Note: ID might be invalid if referenced object was deleted
+                'value_reference_id': val_data.get('reference_id')
             }
         )
         
@@ -281,14 +320,15 @@ def rollback_to_version(version_id, user_id):
         change_summary=f"Rolled back to v{version.version_number}"
     )
     
-    # 4. Invalidate cache
-    invalidate_config_cache(config_object.asset.id, environment)
+    # Cache invalidation on commit (outside transaction)
+    asset_id = config_object.asset.id
+    transaction.on_commit(lambda: invalidate_config_cache(asset_id, environment))
     
-    # Log activity
+    # Log activity on commit
     User = get_user_model()
     try:
         user = User.objects.get(id=user_id)
-        log_activity(
+        transaction.on_commit(lambda: log_activity(
             user=user,
             action="Rolled Back Config",
             target=f"{config_object.name} (v{version.version_number})",
@@ -298,8 +338,8 @@ def rollback_to_version(version_id, user_id):
                 "version": version.version_number,
                 "environment": environment
             }
-        )
+        ))
     except User.DoesNotExist:
-        pass
+        logger.warning(f"User {user_id} not found for activity log")
     
     return True

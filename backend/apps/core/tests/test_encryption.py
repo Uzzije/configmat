@@ -1,8 +1,15 @@
-from django.test import SimpleTestCase
+from django.test import SimpleTestCase, override_settings
 from apps.core.encryption import KeyManager
-import base64
 
+
+@override_settings(ENCRYPTION_KEY='a' * 64)
 class EncryptionTests(SimpleTestCase):
+    """Tests for encryption operations using a test encryption key."""
+    
+    def setUp(self):
+        # Reset the cached KEK before each test to ensure clean state
+        KeyManager.reset_kek()
+    
     def test_dek_generation_and_wrapping(self):
         # 1. Generate DEK
         dek = KeyManager.generate_dek()

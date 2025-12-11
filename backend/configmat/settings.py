@@ -187,6 +187,13 @@ BREVO_API_KEY = os.getenv('BREVO_API_KEY')
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:5173')
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 
+# Encryption Settings
+# CRITICAL: Set ENCRYPTION_KEY in production!
+# Generate with: python -c 'import secrets; print(secrets.token_hex(32))'
+# If not set in DEBUG mode, falls back to SECRET_KEY (insecure, dev only)
+# If not set in production, the app will refuse to start
+ENCRYPTION_KEY = os.getenv('ENCRYPTION_KEY')
+
 # Swappable Capability Service (Open Core vs SaaS)
 # Default to Open Source (Permissive)
 CAPABILITY_SERVICE = "apps.core.capabilities.CapabilityService"

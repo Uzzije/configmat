@@ -1,47 +1,122 @@
-import os
-import secrets
-import base64
+import hashlib
+import logging
+import warnings
 from django.conf import settings
+from django.core.exceptions import ImproperlyConfigured
 import nacl.secret
 import nacl.utils
-import nacl.encoding
 from nacl.exceptions import CryptoError
+
+logger = logging.getLogger(__name__)
+
 
 class KeyManager:
     """
     Manages encryption keys and operations using LibSodium (PyNacl).
+    
     Implements Envelope Encryption:
     - Master Key (KEK): Stored in environment (settings.ENCRYPTION_KEY).
     - Data Key (DEK): Generated per entity, encrypted by KEK.
+    
+    Security:
+    - In production (DEBUG=False), ENCRYPTION_KEY must be explicitly set
+    - In development (DEBUG=True), falls back to SECRET_KEY with a warning
+    - KEK is cached after first load for performance
     """
     
     _kek = None
 
     @classmethod
     def get_kek(cls):
-        """Lazy load KEK from settings"""
+        """
+        Lazy load KEK (Key Encryption Key) from settings.
+        
+        Security:
+        - Production: Requires ENCRYPTION_KEY env var, fails loudly if missing
+        - Development: Falls back to SECRET_KEY with deprecation warning
+        
+        Returns:
+            bytes: 32-byte encryption key
+            
+        Raises:
+            ImproperlyConfigured: If ENCRYPTION_KEY is missing in production
+        """
         if cls._kek is None:
-            # key string must be 32 bytes hex or base64?
-            # Start with getting from env
             key_hex = getattr(settings, 'ENCRYPTION_KEY', None)
+            
             if not key_hex:
-                 # Fallback to SECRET_KEY (Insecure for prod but ok for dev/mvp if 32 bytes)
-                 # SECRET_KEY might be any string. Hash it to get 32 bytes
-                 import hashlib
-                 key_material = settings.SECRET_KEY.encode()
-                 key_digest = hashlib.sha256(key_material).digest()
-                 cls._kek = key_digest
+                # No explicit ENCRYPTION_KEY configured
+                if not settings.DEBUG:
+                    # PRODUCTION: Fail loudly - this is a critical security requirement
+                    raise ImproperlyConfigured(
+                        "ENCRYPTION_KEY must be set in production. "
+                        "This key protects all encrypted secrets in the database. "
+                        "Generate with: python -c 'import secrets; print(secrets.token_hex(32))'"
+                    )
+                else:
+                    # DEVELOPMENT: Allow fallback with warning
+                    warnings.warn(
+                        "ENCRYPTION_KEY not set. Using SECRET_KEY as fallback. "
+                        "DO NOT USE IN PRODUCTION - set ENCRYPTION_KEY environment variable.",
+                        UserWarning,
+                        stacklevel=2
+                    )
+                    logger.warning(
+                        "Using SECRET_KEY as encryption key fallback. "
+                        "This is insecure and should only be used in development."
+                    )
+                    key_material = settings.SECRET_KEY.encode()
+                    cls._kek = hashlib.sha256(key_material).digest()
             else:
-                 try:
-                    cls._kek = bytes.fromhex(key_hex)
-                 except ValueError:
-                    # Maybe base64? For now assume hex as standard
-                    cls._kek = key_hex.encode() # Incorrect if raw string
-                    # Let's enforce 32 bytes or hash it
-                    if len(cls._kek) != 32:
-                         import hashlib
-                         cls._kek = hashlib.sha256(cls._kek).digest()
+                # ENCRYPTION_KEY is set - parse it
+                cls._kek = cls._parse_key(key_hex)
+                logger.info("Encryption key loaded successfully")
+                
         return cls._kek
+
+    @classmethod
+    def _parse_key(cls, key_value: str) -> bytes:
+        """
+        Parse the encryption key from various formats.
+        
+        Supports:
+        - 64-character hex string (32 bytes)
+        - Any other string (will be hashed to 32 bytes)
+        
+        Args:
+            key_value: The key string from settings
+            
+        Returns:
+            bytes: 32-byte key
+        """
+        # Try to parse as hex first (preferred format)
+        try:
+            key_bytes = bytes.fromhex(key_value)
+            if len(key_bytes) == 32:
+                return key_bytes
+            else:
+                logger.warning(
+                    f"ENCRYPTION_KEY hex is {len(key_bytes)} bytes, expected 32. "
+                    "Key will be hashed to correct length."
+                )
+                return hashlib.sha256(key_bytes).digest()
+        except ValueError:
+            # Not valid hex, hash the raw string
+            logger.warning(
+                "ENCRYPTION_KEY is not valid hex. Key will be hashed. "
+                "For best security, use a 64-character hex string."
+            )
+            return hashlib.sha256(key_value.encode()).digest()
+
+    @classmethod
+    def reset_kek(cls):
+        """
+        Reset the cached KEK. Useful for testing.
+        
+        WARNING: Only use in tests. In production, this could cause
+        data to become unreadable if the KEK changes.
+        """
+        cls._kek = None
 
     @classmethod
     def generate_dek(cls) -> bytes:
