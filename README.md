@@ -1,4 +1,4 @@
-# ConfigMat - Configuration Management for Data & Backend Teams (Not Ready Yst)
+# ConfigMat - Configuration Management for Data & Backend Teams (Not Ready Yet)
 
 
 ConfigMat is an open-source configuration management platform built specifically for **Data Engineers** and **Backend Teams**. It solves the problem of "hardcoded configs" and "messy env files" by providing a centralized dashboard where technical leads can define templates, and non-technical stakeholders (product managers, analysts) can safely update configuration values without touching code.
@@ -42,7 +42,7 @@ From ConfigMat CLI (Coming Soon)
 - Install CLI
 - Run `configmat install app --dev` to install the docker images and build the ui app, then you just have to run `configmat run app --dev` to start the app in dev mode.
 
-### 3. Integrate the SDK
+### 3. Integrate the SDK (Not Deployed Yet)
 
 Use the SDKs to fetch configuration dynamically in your code.
 
