@@ -19,6 +19,7 @@ const configObjects = ref([])
 const isLoading = ref(true)
 const error = ref('')
 const activeTab = ref(0)
+const activePageTab = ref('values') // 'values' | 'integration' | 'history'
 
 // Modals
 const showAddObjectModal = ref(false)
@@ -106,6 +107,29 @@ function getObjectValues(configObject) {
 // Check if object has values for current environment
 function hasValues(configObject) {
   return getObjectValues(configObject).length > 0
+}
+
+// Format JSON for display (handles both objects and stringified JSON)
+function formatJsonForDisplay(value) {
+  if (!value) return '{}'
+  
+  // If it's already an object, stringify it
+  if (typeof value === 'object') {
+    return JSON.stringify(value, null, 2)
+  }
+  
+  // If it's a string, try to parse it first
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value)
+      return JSON.stringify(parsed, null, 2)
+    } catch (e) {
+      // If parsing fails, return as-is (might be plain text)
+      return value
+    }
+  }
+  
+  return String(value)
 }
 
 // Check if all environments have the same values
@@ -240,7 +264,15 @@ function openEditValues(configObject) {
         : [{ key: '', value_type: 'string', value_string: '', value_json: null, value_reference: null }]
     }
   } else if (configObject.object_type === 'json') {
-    const jsonValue = existingValues[0]?.value_json || {}
+    let jsonValue = existingValues[0]?.value_json || {}
+    // Parse if it's a string (backend sometimes returns stringified JSON)
+    if (typeof jsonValue === 'string') {
+      try {
+        jsonValue = JSON.parse(jsonValue)
+      } catch (e) {
+        console.warn('Failed to parse JSON value:', e)
+      }
+    }
     editValuesForm.value = {
       environment: currentEnvironment.value,
       values: [{ 
@@ -248,6 +280,18 @@ function openEditValues(configObject) {
         value_type: 'json', 
         value_json: JSON.stringify(jsonValue, null, 2),
         value_string: null,
+        value_reference: null
+      }]
+    }
+  } else if (configObject.object_type === 'yaml') {
+    // YAML is stored as string
+    editValuesForm.value = {
+      environment: currentEnvironment.value,
+      values: [{ 
+        key: configObject.name, 
+        value_type: 'yaml', 
+        value_string: existingValues[0]?.value_string || '',
+        value_json: null,
         value_reference: null
       }]
     }
@@ -553,56 +597,89 @@ onMounted(() => {
 
     <!-- Asset Content -->
     <template v-else-if="asset">
-      <!-- Header -->
-      <div class="flex items-start justify-between">
-        <div class="flex-1">
-          <h1 class="text-3xl font-bold text-foreground normal-case">{{ asset.name }}</h1>
-          <div class="flex items-center gap-4 mt-2 text-sm text-muted-foreground">
-            <span class="font-mono">{{ asset.slug }}</span>
+      <!-- Compact Header -->
+      <div class="flex items-center justify-between mb-6">
+        <div>
+          <h1 class="text-2xl font-bold text-foreground normal-case">{{ asset.name }}</h1>
+          <div class="flex items-center gap-3 mt-1 text-sm text-muted-foreground">
+            <span class="font-mono text-xs">{{ asset.slug }}</span>
             <span>•</span>
-            <span>{{ asset.context }}</span>
-            <span>•</span>
-            <span class="px-2 py-0.5 bg-primary/10 text-primary rounded">{{ asset.context_type }}</span>
-            <span>•</span>
-            <span>Updated {{ formatDate(asset.updated_at) }}</span>
+            <span class="px-2 py-0.5 bg-primary/10 text-primary rounded text-xs">{{ asset.context_type }}</span>
           </div>
-          <p v-if="asset.description" class="mt-2 text-muted-foreground">{{ asset.description }}</p>
         </div>
         <div class="flex gap-2">
-          <button @click="showHistoryModal = true" class="px-4 py-2 bg-background border border-input rounded-lg hover:bg-muted">
-            History
-          </button>
-          <button @click="editAsset" class="px-4 py-2 bg-background border border-input rounded-lg hover:bg-muted">
+          <button @click="editAsset" class="px-3 py-1.5 text-sm bg-background border border-input rounded-lg hover:bg-muted">
             Edit
           </button>
-          <button @click="deleteAsset" class="px-4 py-2 bg-destructive/10 text-destructive border border-destructive/20 rounded-lg hover:bg-destructive/20">
+          <button @click="deleteAsset" class="px-3 py-1.5 text-sm bg-destructive/10 text-destructive border border-destructive/20 rounded-lg hover:bg-destructive/20">
             Delete
           </button>
         </div>
       </div>
 
-      <!-- Environment & Actions Bar -->
-      <div class="bg-card border border-border rounded-lg p-4 flex items-center justify-between">
-        <div class="flex items-center gap-4">
-          <label class="text-sm font-medium text-foreground">Environment:</label>
-          <select
-            v-model="environmentStore.currentEnvironment"
-            class="px-4 py-2 bg-background border border-input rounded-lg text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+      <!-- Main Tab Navigation -->
+      <div class="border-b border-border mb-6">
+        <div class="flex gap-6">
+          <button
+            @click="activePageTab = 'values'"
+            :class="[
+              'pb-3 px-1 text-sm font-medium border-b-2 transition-colors',
+              activePageTab === 'values'
+                ? 'border-primary text-primary'
+                : 'border-transparent text-muted-foreground hover:text-foreground'
+            ]"
           >
-            <option value="local">Local</option>
-            <option value="stage">Stage</option>
-            <option value="prod">Production</option>
-          </select>
-        </div>
-        <div class="flex gap-2">
-          <button @click="showPromoteModal = true" class="px-4 py-2 bg-secondary text-secondary-foreground rounded-lg hover:opacity-90">
-            Promote Config
+            Values
           </button>
-          <button @click="showAddObjectModal = true" class="px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:opacity-90">
-            + Add Object
+          <button
+            @click="activePageTab = 'integration'"
+            :class="[
+              'pb-3 px-1 text-sm font-medium border-b-2 transition-colors',
+              activePageTab === 'integration'
+                ? 'border-primary text-primary'
+                : 'border-transparent text-muted-foreground hover:text-foreground'
+            ]"
+          >
+            Integration
+          </button>
+          <button
+            @click="activePageTab = 'history'"
+            :class="[
+              'pb-3 px-1 text-sm font-medium border-b-2 transition-colors',
+              activePageTab === 'history'
+                ? 'border-primary text-primary'
+                : 'border-transparent text-muted-foreground hover:text-foreground'
+            ]"
+          >
+            History
           </button>
         </div>
       </div>
+
+      <!-- Values Tab -->
+      <div v-show="activePageTab === 'values'">
+        <!-- Environment & Actions Bar -->
+        <div class="bg-card border border-border rounded-lg p-4 flex items-center justify-between mb-6">
+          <div class="flex items-center gap-4">
+            <label class="text-sm font-medium text-foreground">Environment:</label>
+            <select
+              v-model="environmentStore.currentEnvironment"
+              class="px-4 py-2 bg-background border border-input rounded-lg text-foreground focus:outline-none focus:ring-2 focus:ring-ring"
+            >
+              <option value="local">Local</option>
+              <option value="stage">Stage</option>
+              <option value="prod">Production</option>
+            </select>
+          </div>
+          <div class="flex gap-2">
+            <button @click="showPromoteModal = true" class="px-4 py-2 bg-secondary text-secondary-foreground rounded-lg hover:opacity-90">
+              Promote Config
+            </button>
+            <button @click="showAddObjectModal = true" class="px-4 py-2 bg-primary text-primary-foreground rounded-lg hover:opacity-90">
+              + Add Object
+            </button>
+          </div>
+        </div>
 
       <!-- Config Objects -->
       <div v-if="configObjects.length === 0" class="bg-card border border-border rounded-lg p-12 text-center">
@@ -784,7 +861,7 @@ onMounted(() => {
 
             <!-- JSON Type -->
             <div v-else-if="obj.object_type === 'json'" class="border border-border rounded-lg p-4 bg-muted/30">
-              <pre class="text-sm font-mono overflow-x-auto">{{ JSON.stringify(getObjectValues(obj)[0]?.value_json, null, 2) }}</pre>
+              <pre class="text-sm font-mono overflow-x-auto">{{ formatJsonForDisplay(getObjectValues(obj)[0]?.value_json) }}</pre>
             </div>
 
             <!-- YAML Type -->
@@ -797,27 +874,160 @@ onMounted(() => {
               <pre class="text-sm whitespace-pre-wrap">{{ getObjectValues(obj)[0]?.value_string }}</pre>
             </div>
 
-            <!-- API Usage Section -->
-            <div v-if="hasValues(obj)" class="mt-6 space-y-4">
-              <h4 class="text-sm font-semibold text-foreground">API Usage</h4>
+            <!-- How to Access This Object -->
+            <div v-if="hasValues(obj)" class="mt-6">
+              <h4 class="text-sm font-semibold text-foreground mb-3">How to Access</h4>
               
-              <!-- Curl Command -->
-              <div>
-                <label class="block text-xs font-medium text-muted-foreground mb-2">cURL Command</label>
-                <div class="bg-muted/50 border border-border rounded-lg p-3 font-mono text-xs overflow-x-auto">
-                  <pre class="text-foreground">{{ generateCurlCommand(obj) }}</pre>
+              <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                <!-- CLI -->
+                <div class="border border-border rounded-lg p-3 bg-muted/20">
+                  <div class="flex items-center gap-2 mb-2">
+                    <svg class="w-3 h-3 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+                    </svg>
+                    <h5 class="font-semibold text-xs">CLI</h5>
+                  </div>
+                  <div class="bg-muted/50 rounded p-2 font-mono text-[10px] overflow-x-auto">
+                    <div class="text-foreground">configmat get {{ asset.slug }}</div>
+                    <div class="text-foreground">  --key {{ obj.key || obj.name.toLowerCase().replace(/\s+/g, '-') }}</div>
+                  </div>
                 </div>
-              </div>
 
-              <!-- Sample Response -->
-              <div>
-                <label class="block text-xs font-medium text-muted-foreground mb-2">Sample Response</label>
-                <div class="bg-muted/50 border border-border rounded-lg p-3 font-mono text-xs overflow-x-auto">
-                  <pre class="text-foreground">{{ generateSampleResponse(obj) }}</pre>
+                <!-- Python SDK -->
+                <div class="border border-border rounded-lg p-3 bg-muted/20">
+                  <div class="flex items-center gap-2 mb-2">
+                    <svg class="w-3 h-3 text-blue-600" fill="currentColor" viewBox="0 0 24 24">
+                      <path d="M14.25.18l.9.2.73.26.59.3.45.32.34.34.25.34.16.33.1.3.04.26.02.2-.01.13V8.5l-.05.63-.13.55-.21.46-.26.38-.3.31-.33.25-.35.19-.35.14-.33.1-.3.07-.26.04-.21.02H8.77l-.69.05-.59.14-.5.22-.41.27-.33.32-.27.35-.2.36-.15.37-.1.35-.07.32-.04.27-.02.21v3.06H3.17l-.21-.03-.28-.07-.32-.12-.35-.18-.36-.26-.36-.36-.35-.46-.32-.59-.28-.73-.21-.88-.14-1.05-.05-1.23.06-1.22.16-1.04.24-.87.32-.71.36-.57.4-.44.42-.33.42-.24.4-.16.36-.1.32-.05.24-.01h.16l.06.01h8.16v-.83H6.18l-.01-2.75-.02-.37.05-.34.11-.31.17-.28.25-.26.31-.23.38-.2.44-.18.51-.15.58-.12.64-.1.71-.06.77-.04.84-.02 1.27.05zm-6.3 1.98l-.23.33-.08.41.08.41.23.34.33.22.41.09.41-.09.33-.22.23-.34.08-.41-.08-.41-.23-.33-.33-.22-.41-.09-.41.09zm13.09 3.95l.28.06.32.12.35.18.36.27.36.35.35.47.32.59.28.73.21.88.14 1.04.05 1.23-.06 1.23-.16 1.04-.24.86-.32.71-.36.57-.4.45-.42.33-.42.24-.4.16-.36.09-.32.05-.24.02-.16-.01h-8.22v.82h5.84l.01 2.76.02.36-.05.34-.11.31-.17.29-.25.25-.31.24-.38.2-.44.17-.51.15-.58.13-.64.09-.71.07-.77.04-.84.01-1.27-.04-1.07-.14-.9-.2-.73-.25-.59-.3-.45-.33-.34-.34-.25-.34-.16-.33-.1-.3-.04-.25-.02-.2.01-.13v-5.34l.05-.64.13-.54.21-.46.26-.38.3-.32.33-.24.35-.2.35-.14.33-.1.3-.06.26-.04.21-.02.13-.01h5.84l.69-.05.59-.14.5-.21.41-.28.33-.32.27-.35.2-.36.15-.36.1-.35.07-.32.04-.28.02-.21V6.07h2.09l.14.01zm-6.47 14.25l-.23.33-.08.41.08.41.23.33.33.23.41.08.41-.08.33-.23.23-.33.08-.41-.08-.41-.23-.33-.33-.23-.41-.08-.41.08z"/>
+                    </svg>
+                    <h5 class="font-semibold text-xs">Python</h5>
+                  </div>
+                  <div class="bg-muted/50 rounded p-2 font-mono text-[10px] overflow-x-auto">
+                    <div class="text-foreground">config = client.get(</div>
+                    <div class="text-foreground ml-2">"{{ asset.slug }}"</div>
+                    <div class="text-foreground">)</div>
+                    <div class="text-foreground mt-1">val = config["{{ obj.key || obj.name.toLowerCase().replace(/\s+/g, '-') }}"]</div>
+                  </div>
+                </div>
+
+                <!-- Node.js SDK -->
+                <div class="border border-border rounded-lg p-3 bg-muted/20">
+                  <div class="flex items-center gap-2 mb-2">
+                    <svg class="w-3 h-3 text-green-600" fill="currentColor" viewBox="0 0 24 24">
+                      <path d="M11.998,24c-0.321,0-0.641-0.084-0.922-0.247l-2.936-1.737c-0.438-0.245-0.224-0.332-0.08-0.383 c0.585-0.203,0.703-0.25,1.328-0.604c0.065-0.037,0.151-0.023,0.218,0.017l2.256,1.339c0.082,0.045,0.197,0.045,0.272,0l8.795-5.076 c0.082-0.047,0.134-0.141,0.134-0.238V6.921c0-0.099-0.053-0.192-0.137-0.242l-8.791-5.072c-0.081-0.047-0.189-0.047-0.271,0 L3.075,6.68C2.99,6.729,2.936,6.825,2.936,6.921v10.15c0,0.097,0.054,0.189,0.139,0.235l2.409,1.392 c1.307,0.654,2.108-0.116,2.108-0.89V7.787c0-0.142,0.114-0.253,0.256-0.253h1.115c0.139,0,0.255,0.112,0.255,0.253v10.021 c0,1.745-0.95,2.745-2.604,2.745c-0.508,0-0.909,0-2.026-0.551L2.28,18.675c-0.57-0.329-0.922-0.945-0.922-1.604V6.921 c0-0.659,0.353-1.275,0.922-1.603l8.795-5.082c0.557-0.315,1.296-0.315,1.848,0l8.794,5.082c0.57,0.329,0.924,0.944,0.924,1.603 v10.15c0,0.659-0.354,1.273-0.924,1.604l-8.794,5.078C12.643,23.916,12.324,24,11.998,24z M19.099,13.993 c0-1.9-1.284-2.406-3.987-2.763c-2.731-0.361-3.009-0.548-3.009-1.187c0-0.528,0.235-1.233,2.258-1.233 c1.807,0,2.473,0.389,2.747,1.607c0.024,0.115,0.129,0.199,0.247,0.199h1.141c0.071,0,0.138-0.031,0.186-0.081 c0.048-0.054,0.074-0.123,0.067-0.196c-0.177-2.098-1.571-3.076-4.388-3.076c-2.508,0-4.004,1.058-4.004,2.833 c0,1.925,1.488,2.457,3.895,2.695c2.88,0.282,3.103,0.703,3.103,1.269c0,0.983-0.789,1.402-2.642,1.402 c-2.327,0-2.839-0.584-3.011-1.742c-0.02-0.124-0.126-0.215-0.253-0.215h-1.137c-0.141,0-0.254,0.112-0.254,0.253 c0,1.482,0.806,3.248,4.655,3.248C17.501,17.007,19.099,15.91,19.099,13.993z"/>
+                    </svg>
+                    <h5 class="font-semibold text-xs">Node.js</h5>
+                  </div>
+                  <div class="bg-muted/50 rounded p-2 font-mono text-[10px] overflow-x-auto">
+                    <div class="text-foreground">const config = ConfigMat</div>
+                    <div class="text-foreground ml-2">.load({ asset: '{{ asset.slug }}' })</div>
+                    <div class="text-foreground mt-1">const val = config.get(</div>
+                    <div class="text-foreground ml-2">'{{ obj.key || obj.name.toLowerCase().replace(/\s+/g, '-') }}'</div>
+                    <div class="text-foreground">)</div>
+                  </div>
+                </div>
+
+                <!-- cURL / REST API -->
+                <div class="border border-border rounded-lg p-3 bg-muted/20">
+                  <div class="flex items-center gap-2 mb-2">
+                    <svg class="w-3 h-3 text-orange-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"/>
+                    </svg>
+                    <h5 class="font-semibold text-xs">REST API</h5>
+                  </div>
+                  <div class="bg-muted/50 rounded p-2 font-mono text-[10px] overflow-x-auto">
+                    <div class="text-foreground">curl {{ generateCurlCommand(obj).split('\n')[0] }}</div>
+                  </div>
                 </div>
               </div>
             </div>
           </div>
+        </div>
+      </div>
+      </div> <!-- End Values Tab -->
+
+      <!-- Integration Tab -->
+      <div v-show="activePageTab === 'integration'" class="space-y-6">
+        <div class="bg-card border border-border rounded-lg p-6">
+          <h2 class="text-lg font-semibold text-foreground mb-4 flex items-center gap-2">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4"/>
+            </svg>
+            How to Access This Asset
+          </h2>
+          
+          <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            <!-- CLI -->
+            <div class="border border-border rounded-lg p-4 bg-muted/20">
+              <div class="flex items-center gap-2 mb-3">
+                <svg class="w-4 h-4 text-primary" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+                </svg>
+                <h3 class="font-semibold text-sm">CLI</h3>
+              </div>
+              <div class="bg-muted/50 rounded p-3 font-mono text-xs overflow-x-auto">
+                <div class="text-muted-foreground mb-1"># Get configuration</div>
+                <div class="text-foreground">configmat get {{ asset.slug }}</div>
+                <div class="text-muted-foreground mt-2 mb-1"># Pull to local</div>
+                <div class="text-foreground">configmat pull</div>
+              </div>
+            </div>
+
+            <!-- Python SDK -->
+            <div class="border border-border rounded-lg p-4 bg-muted/20">
+              <div class="flex items-center gap-2 mb-3">
+                <svg class="w-4 h-4 text-blue-600" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M14.25.18l.9.2.73.26.59.3.45.32.34.34.25.34.16.33.1.3.04.26.02.2-.01.13V8.5l-.05.63-.13.55-.21.46-.26.38-.3.31-.33.25-.35.19-.35.14-.33.1-.3.07-.26.04-.21.02H8.77l-.69.05-.59.14-.5.22-.41.27-.33.32-.27.35-.2.36-.15.37-.1.35-.07.32-.04.27-.02.21v3.06H3.17l-.21-.03-.28-.07-.32-.12-.35-.18-.36-.26-.36-.36-.35-.46-.32-.59-.28-.73-.21-.88-.14-1.05-.05-1.23.06-1.22.16-1.04.24-.87.32-.71.36-.57.4-.44.42-.33.42-.24.4-.16.36-.1.32-.05.24-.01h.16l.06.01h8.16v-.83H6.18l-.01-2.75-.02-.37.05-.34.11-.31.17-.28.25-.26.31-.23.38-.2.44-.18.51-.15.58-.12.64-.1.71-.06.77-.04.84-.02 1.27.05zm-6.3 1.98l-.23.33-.08.41.08.41.23.34.33.22.41.09.41-.09.33-.22.23-.34.08-.41-.08-.41-.23-.33-.33-.22-.41-.09-.41.09zm13.09 3.95l.28.06.32.12.35.18.36.27.36.35.35.47.32.59.28.73.21.88.14 1.04.05 1.23-.06 1.23-.16 1.04-.24.86-.32.71-.36.57-.4.45-.42.33-.42.24-.4.16-.36.09-.32.05-.24.02-.16-.01h-8.22v.82h5.84l.01 2.76.02.36-.05.34-.11.31-.17.29-.25.25-.31.24-.38.2-.44.17-.51.15-.58.13-.64.09-.71.07-.77.04-.84.01-1.27-.04-1.07-.14-.9-.2-.73-.25-.59-.3-.45-.33-.34-.34-.25-.34-.16-.33-.1-.3-.04-.25-.02-.2.01-.13v-5.34l.05-.64.13-.54.21-.46.26-.38.3-.32.33-.24.35-.2.35-.14.33-.1.3-.06.26-.04.21-.02.13-.01h5.84l.69-.05.59-.14.5-.21.41-.28.33-.32.27-.35.2-.36.15-.36.1-.35.07-.32.04-.28.02-.21V6.07h2.09l.14.01zm-6.47 14.25l-.23.33-.08.41.08.41.23.33.33.23.41.08.41-.08.33-.23.23-.33.08-.41-.08-.41-.23-.33-.33-.23-.41-.08-.41.08z"/>
+                </svg>
+                <h3 class="font-semibold text-sm">Python SDK</h3>
+              </div>
+              <div class="bg-muted/50 rounded p-3 font-mono text-xs overflow-x-auto">
+                <div class="text-muted-foreground mb-1"># Initialize</div>
+                <div class="text-foreground">from configmat import ConfigMat</div>
+                <div class="text-foreground mt-1">client = ConfigMat(api_key="...")</div>
+                <div class="text-muted-foreground mt-2 mb-1"># Get config</div>
+                <div class="text-foreground">config = client.get("{{ asset.slug }}")</div>
+              </div>
+            </div>
+
+            <!-- Node.js SDK -->
+            <div class="border border-border rounded-lg p-4 bg-muted/20">
+              <div class="flex items-center gap-2 mb-3">
+                <svg class="w-4 h-4 text-green-600" fill="currentColor" viewBox="0 0 24 24">
+                  <path d="M11.998,24c-0.321,0-0.641-0.084-0.922-0.247l-2.936-1.737c-0.438-0.245-0.224-0.332-0.08-0.383 c0.585-0.203,0.703-0.25,1.328-0.604c0.065-0.037,0.151-0.023,0.218,0.017l2.256,1.339c0.082,0.045,0.197,0.045,0.272,0l8.795-5.076 c0.082-0.047,0.134-0.141,0.134-0.238V6.921c0-0.099-0.053-0.192-0.137-0.242l-8.791-5.072c-0.081-0.047-0.189-0.047-0.271,0 L3.075,6.68C2.99,6.729,2.936,6.825,2.936,6.921v10.15c0,0.097,0.054,0.189,0.139,0.235l2.409,1.392 c1.307,0.654,2.108-0.116,2.108-0.89V7.787c0-0.142,0.114-0.253,0.256-0.253h1.115c0.139,0,0.255,0.112,0.255,0.253v10.021 c0,1.745-0.95,2.745-2.604,2.745c-0.508,0-0.909,0-2.026-0.551L2.28,18.675c-0.57-0.329-0.922-0.945-0.922-1.604V6.921 c0-0.659,0.353-1.275,0.922-1.603l8.795-5.082c0.557-0.315,1.296-0.315,1.848,0l8.794,5.082c0.57,0.329,0.924,0.944,0.924,1.603 v10.15c0,0.659-0.354,1.273-0.924,1.604l-8.794,5.078C12.643,23.916,12.324,24,11.998,24z M19.099,13.993 c0-1.9-1.284-2.406-3.987-2.763c-2.731-0.361-3.009-0.548-3.009-1.187c0-0.528,0.235-1.233,2.258-1.233 c1.807,0,2.473,0.389,2.747,1.607c0.024,0.115,0.129,0.199,0.247,0.199h1.141c0.071,0,0.138-0.031,0.186-0.081 c0.048-0.054,0.074-0.123,0.067-0.196c-0.177-2.098-1.571-3.076-4.388-3.076c-2.508,0-4.004,1.058-4.004,2.833 c0,1.925,1.488,2.457,3.895,2.695c2.88,0.282,3.103,0.703,3.103,1.269c0,0.983-0.789,1.402-2.642,1.402 c-2.327,0-2.839-0.584-3.011-1.742c-0.02-0.124-0.126-0.215-0.253-0.215h-1.137c-0.141,0-0.254,0.112-0.254,0.253 c0,1.482,0.806,3.248,4.655,3.248C17.501,17.007,19.099,15.91,19.099,13.993z"/>
+                </svg>
+                <h3 class="font-semibold text-sm">Node.js SDK</h3>
+              </div>
+              <div class="bg-muted/50 rounded p-3 font-mono text-xs overflow-x-auto">
+                <div class="text-muted-foreground mb-1"># Initialize</div>
+                <div class="text-foreground">import { ConfigMat } from '@configmat/sdk'</div>
+                <div class="text-muted-foreground mt-2 mb-1"># Load config</div>
+                <div class="text-foreground">const config = ConfigMat.load({</div>
+                <div class="text-foreground ml-2">asset: '{{ asset.slug }}'</div>
+                <div class="text-foreground">})</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="mt-4 p-3 bg-blue-500/10 border border-blue-500/20 rounded-lg">
+            <div class="flex items-start gap-2">
+              <svg class="w-4 h-4 text-blue-600 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+              </svg>
+              <div class="text-sm">
+                <p class="text-foreground font-medium mb-1">Need API credentials?</p>
+                <p class="text-muted-foreground">Generate an API key in <router-link to="/api-keys" class="text-primary hover:underline">Settings → API Keys</router-link> to authenticate your CLI and SDK requests.</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- History Tab -->
+      <div v-show="activePageTab === 'history'">
+        <div class="bg-card border border-border rounded-lg p-6">
+          <p class="text-muted-foreground text-center py-12">
+            Asset-level history coming soon. For now, use the "History" button on individual config objects.
+          </p>
         </div>
       </div>
     </template>
